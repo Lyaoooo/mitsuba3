@@ -203,7 +203,7 @@ class CameraIntegrator(PSIntegrator):
             ray, weight, pos = self.sample_rays(scene, sensor, sampler)
 
             # Launch the Monte Carlo sampling process in differentiable mode
-            L, valid, aovs, _ = self.sample(
+            L, valid, aovs, _, first_it_t = self.sample(
                 mode     = dr.ADMode.Primal,
                 # mode     = mode,
                 scene    = scene,
@@ -229,12 +229,16 @@ class CameraIntegrator(PSIntegrator):
                 sensor.far_clip()
             )
             sample_to_camera = camera_to_sample.inverse()
-            pos_film = sample_to_camera @ mi.Point3f(pos.x, pos.y, 0)
-            pos_world = sensor.world_transform() @ pos_film
-            
-        pos_film = sensor.world_transform().inverse() @ pos_world
-        pos = camera_to_sample @ pos_film
-        pos = mi.Point2f(pos.x, pos.y)
+            p_min = sample_to_camera @ mi.Point3f(0, 0, 0)
+            multiplier = sensor.near_clip() / dr.abs(p_min[0] * 2.0) * film.size()[0]
+
+        to_world = sensor.world_transform()
+        to_local = to_world.inverse()
+        pin_attached_local = dr.detach(to_local) @ (to_world @ mi.Point3f(0))
+        its_p_local = dr.detach(to_local @ mi.Point3f(ray(first_it_t)))
+        p_tracker = dr.lerp(pin_attached_local, its_p_local, 0)#dr.rcp(its_p_local[2]))
+        pos__ = mi.Vector2f(p_tracker[0], p_tracker[1]) * multiplier
+        pos = dr.replace_grad(pos, pos__)
 
 
         block = film.create_block()
@@ -245,7 +249,7 @@ class CameraIntegrator(PSIntegrator):
             value=L * weight,
             weight=1.0,
             alpha=dr.select(valid, mi.Float(1), mi.Float(0)),
-            aovs=[aov * weight for aov in aovs],
+            aovs=[],
             wavelengths=ray.wavelengths
         )
 
@@ -296,6 +300,7 @@ class CameraIntegrator(PSIntegrator):
             with dr.resume_grad(when=not primal):
                 si = scene.ray_intersect(ray, ray_flags=mi.RayFlags.All,
                              coherent=True, active=active)
+        first_it_t = dr.detach(mi.Float(si.t))
 
         # Hide the environment emitter if necessary
         if not self.hide_emitters:
@@ -310,7 +315,7 @@ class CameraIntegrator(PSIntegrator):
         # ---------------------- Emitter sampling ----------------------
 
         # Is emitter sampling possible on the current vertex?
-        active_em_ = active_next & mi.has_flag(bsdf.flags(), mi.BSDFFlags.Smooth)
+        active_em_ = active_next & mi.has_flag(bsdf.flags(), mi.BSDFFlags.Smooth) & False
 
         # If so, pick an emitter and sample a detached emitter direction
         ds_em, emitter_val = scene.sample_emitter_direction(
@@ -341,7 +346,7 @@ class CameraIntegrator(PSIntegrator):
         # Perform detached BSDF sampling
         sample_bsdf, weight_bsdf = bsdf.sample(bsdf_ctx, si, sampler.next_1d(active_next),
                                                sampler.next_2d(active_next), active_next)
-        active_bsdf = active_next & dr.any(dr.neq(weight_bsdf, 0.0))
+        active_bsdf = active_next & dr.any(dr.neq(weight_bsdf, 0.0)) & False
         delta_bsdf = mi.has_flag(sample_bsdf.sampled_type, mi.BSDFFlags.Delta)
 
         # Construct the BSDF sampled ray
@@ -406,7 +411,7 @@ class CameraIntegrator(PSIntegrator):
 
                 guide_seed = [dr.detach(ray_seed), active_guide | mask_replace]
 
-        return L, active, [], guide_seed if project else None
+        return L, active, [], guide_seed if project else None, first_it_t
 
 
     # def sample_radiance_difference(self, scene, ss, curr_depth, sampler, active):

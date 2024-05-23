@@ -74,7 +74,7 @@ class ADIntegrator(mi.CppADIntegrator):
             ray, weight, pos = self.sample_rays(scene, sensor, sampler)
 
             # Launch the Monte Carlo sampling process in primal mode
-            L, valid, aovs, _ = self.sample(
+            L, valid, aovs, _, _ = self.sample(
                 mode=dr.ADMode.Primal,
                 scene=scene,
                 sampler=sampler,
