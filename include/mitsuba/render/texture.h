@@ -17,7 +17,7 @@ NAMESPACE_BEGIN(mitsuba)
  * unitless reflectance parameters (e.g. an albedo of a reflectance model).
  *
  * The spectrum can be evaluated at arbitrary (continuous) wavelengths, though
- * the underlying function it is not required to be smooth or even continuous.
+ * the underlying function is not required to be smooth or even continuous.
  */
 template <typename Float, typename Spectrum>
 class MI_EXPORT_LIB Texture : public Object {

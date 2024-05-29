@@ -217,29 +217,56 @@ class CameraIntegrator(PSIntegrator):
                 si_shade = None
             )
 
-        # camera-sample movement simulation
-        with dr.suspend_grad():
-            film = sensor.film()
-            camera_to_sample = mi.perspective_projection(
-                film.size(),
-                film.crop_size(),
-                film.crop_offset(),
-                mi.traverse(sensor)["x_fov"][0],
-                sensor.near_clip(),
-                sensor.far_clip()
-            )
-            sample_to_camera = camera_to_sample.inverse()
-            p_min = sample_to_camera @ mi.Point3f(0, 0, 0)
-            multiplier = sensor.near_clip() / dr.abs(p_min[0] * 2.0) * film.size()[0]
+        # To support camera intrinsics derivatives
+        if True:
+            with dr.suspend_grad():
+                film = sensor.film()
+                camera_to_sample = mi.perspective_projection(
+                    film.size(),
+                    film.crop_size(),
+                    film.crop_offset(),
+                    mi.traverse(sensor)["x_fov"][0],
+                    sensor.near_clip(),
+                    sensor.far_clip()
+                )
 
-        to_world = sensor.world_transform()
-        to_local = to_world.inverse()
-        pin_attached_local = dr.detach(to_local) @ (to_world @ mi.Point3f(0))
-        its_p_local = dr.detach(to_local @ mi.Point3f(ray(first_it_t)))
-        p_tracker = dr.lerp(pin_attached_local, its_p_local, 0)#dr.rcp(its_p_local[2]))
-        pos__ = mi.Vector2f(p_tracker[0], p_tracker[1]) * multiplier
-        pos = dr.replace_grad(pos, pos__)
+                if True:
+                    # Min distance filter
+                    if False:
+                        # reduce op (no cuda support)
+                        pos_i = mi.Vector2i(pos)
+                        pixel_index = pos_i.y * film.size()[0] + pos_i.x
+                        res = dr.zeros(mi.Float, film.size()[0] * film.size()[1])
+                        dr.scatter_reduce(dr.ReduceOp.Min, res, first_it_t, pixel_index, valid)
+                        distance = dr.gather(mi.Float, res, pixel_index, valid)
+                    else:
+                        # loop version
+                        pos_i = mi.Vector2i(pos)
+                        pixel_index = pos_i.y * film.size()[0] + pos_i.x
+                        
+                        num_pixels = film.size()[0] * film.size()[1]
+                        res = dr.full(mi.Float, dr.inf, num_pixels)
+                        idx = dr.arange(mi.UInt32, num_pixels) * spp
+                        first_it_t[~valid] = dr.inf
+                        iter = mi.UInt32(0)
 
+                        loop = mi.Loop("Loop scatter reduce", lambda: (iter, res))
+                        while loop(iter < spp):
+                            t_tmp = dr.gather(mi.Float, first_it_t, idx + iter)
+                            res = dr.select(t_tmp < res, t_tmp, res)
+                            iter += 1
+
+                        distance = dr.gather(mi.Float, res, pixel_index)
+                else:
+                    distance = first_it_t
+
+            to_world = sensor.world_transform()
+            to_local = to_world.inverse()
+            world_to_sample = camera_to_sample @ to_local
+
+            pin_attached_local = world_to_sample @ dr.detach(ray(distance))
+            pos__ = mi.Vector2f(pin_attached_local[0], pin_attached_local[1]) * film.size()  # Why * film.size()?
+            pos = dr.replace_grad(pos, pos__)
 
         block = film.create_block()
         block.set_coalesce(block.coalesce() and sppc >= 4)
@@ -315,7 +342,7 @@ class CameraIntegrator(PSIntegrator):
         # ---------------------- Emitter sampling ----------------------
 
         # Is emitter sampling possible on the current vertex?
-        active_em_ = active_next & mi.has_flag(bsdf.flags(), mi.BSDFFlags.Smooth) & False
+        active_em_ = active_next & mi.has_flag(bsdf.flags(), mi.BSDFFlags.Smooth)
 
         # If so, pick an emitter and sample a detached emitter direction
         ds_em, emitter_val = scene.sample_emitter_direction(
@@ -346,7 +373,7 @@ class CameraIntegrator(PSIntegrator):
         # Perform detached BSDF sampling
         sample_bsdf, weight_bsdf = bsdf.sample(bsdf_ctx, si, sampler.next_1d(active_next),
                                                sampler.next_2d(active_next), active_next)
-        active_bsdf = active_next & dr.any(dr.neq(weight_bsdf, 0.0)) & False
+        active_bsdf = active_next & dr.any(dr.neq(weight_bsdf, 0.0))
         delta_bsdf = mi.has_flag(sample_bsdf.sampled_type, mi.BSDFFlags.Delta)
 
         # Construct the BSDF sampled ray

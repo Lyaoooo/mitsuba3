@@ -45,8 +45,14 @@ This plugin provides a simple procedural checkerboard texture with customizable 
     .. code-tab:: python
 
         'type': 'checkerboard',
-        'color0': [0.1, 0.1, 0.1],
-        'color1': [0.5, 0.5, 0.5]
+        'color0': {
+            'type': 'rgb',
+            'value': [0.1, 0.1, 0.1]
+        },
+        'color1': {
+            'type': 'rgb',
+            'value': [0.5, 0.5, 0.5]
+        },
 
  */
 
