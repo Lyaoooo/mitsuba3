@@ -243,7 +243,7 @@ class CameraIntegrator(PSIntegrator):
                         # loop version
                         pos_i = mi.Vector2i(pos)
                         pixel_index = pos_i.y * film.size()[0] + pos_i.x
-                        
+
                         num_pixels = film.size()[0] * film.size()[1]
                         res = dr.full(mi.Float, dr.inf, num_pixels)
                         idx = dr.arange(mi.UInt32, num_pixels) * spp
@@ -256,6 +256,7 @@ class CameraIntegrator(PSIntegrator):
                             res = dr.select(t_tmp < res, t_tmp, res)
                             iter += 1
 
+                        res[dr.isinf(res)] = 1
                         distance = dr.gather(mi.Float, res, pixel_index)
                 else:
                     distance = first_it_t
