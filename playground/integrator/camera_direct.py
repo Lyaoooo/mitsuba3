@@ -5,7 +5,7 @@ import mitsuba as mi
 
 from mitsuba.ad.integrators.common import PSIntegrator, ADIntegrator, mis_weight
 
-class CameraIntegrator(PSIntegrator):
+class CameraDirIntegrator(PSIntegrator):
 
     def __init__(self, props):
         super().__init__(props)
@@ -22,123 +22,6 @@ class CameraIntegrator(PSIntegrator):
         if self.project_seed not in ['both', 'bsdf', 'emitter']:
             raise Exception(f"Project seed must be one of 'both', 'bsdf', "
                             f"'emitter', got '{self.project_seed}'")
-
-
-    def render_forward(self,
-                       scene: mi.Scene,
-                       params: Any,
-                       sensor: Union[int, mi.Sensor] = 0,
-                       seed: int = 0,
-                       spp: int = 0) -> mi.TensorXf:
-        if isinstance(sensor, int):
-            sensor = scene.sensors()[sensor]
-
-        film = sensor.film()
-        shape = (film.crop_size()[1],
-                 film.crop_size()[0],
-                 film.base_channels_count() + len(self.aov_names()))
-        result_grad = dr.zeros(mi.TensorXf, shape=shape)
-
-        sampler_spp = sensor.sampler().sample_count()
-        sppc = self.override_spp(self.sppc, spp, sampler_spp)
-        sppp = self.override_spp(self.sppp, spp, sampler_spp)
-        sppi = self.override_spp(self.sppi, spp, sampler_spp)
-
-        # Discontinuous derivative (and the non-RB continuous derivative)
-        if sppp > 0 or sppi > 0 or \
-           (sppc > 0 and not self.radiative_backprop):
-
-            # Compute an image with all derivatives attached
-            ad_img = self.render_ad(scene, sensor, seed, spp, dr.ADMode.Forward)
-
-            # We should only complain about the parameters not being attached
-            # if `ad_img` isn't attached and we haven't used RB for the
-            # continuous derivatives.
-            if dr.grad_enabled(ad_img) or not self.radiative_backprop:
-                dr.forward_to(ad_img)
-                grad_img = dr.grad(ad_img)
-                result_grad += grad_img
-
-        return result_grad
-
-    def sample_rays(
-        self,
-        scene: mi.Scene,
-        sensor: mi.Sensor,
-        sampler: mi.Sampler,
-    ) -> Tuple[mi.RayDifferential3f, mi.Spectrum, mi.Vector2f, mi.Float]:
-        """
-        Sample a 2D grid of primary rays for a given sensor
-
-        Returns a tuple containing
-
-        - the set of sampled rays
-        - a ray weight (usually 1 if the sensor's response function is sampled
-          perfectly)
-        - the continuous 2D image-space positions associated with each ray
-        """
-
-        film = sensor.film()
-        film_size = film.crop_size()
-        rfilter = film.rfilter()
-        border_size = rfilter.border_size()
-
-        if film.sample_border():
-            film_size += 2 * border_size
-
-        spp = sampler.sample_count()
-
-        # Compute discrete sample position
-        idx = dr.arange(mi.UInt32, dr.prod(film_size) * spp)
-
-        # Try to avoid a division by an unknown constant if we can help it
-        log_spp = dr.log2i(spp)
-        if 1 << log_spp == spp:
-            idx >>= dr.opaque(mi.UInt32, log_spp)
-        else:
-            idx //= dr.opaque(mi.UInt32, spp)
-
-        # Compute the position on the image plane
-        pos = mi.Vector2i()
-        pos.y = idx // film_size[0]
-        pos.x = dr.fma(-film_size[0], pos.y, idx)
-
-        if film.sample_border():
-            pos -= border_size
-
-        pos += mi.Vector2i(film.crop_offset())
-
-        # Cast to floating point and add random offset
-        pos_f = mi.Vector2f(pos) + sampler.next_2d()
-
-        # Re-scale the position to [0, 1]^2
-        scale = dr.rcp(mi.ScalarVector2f(film.crop_size()))
-        offset = -mi.ScalarVector2f(film.crop_offset()) * scale
-        pos_adjusted = dr.fma(pos_f, scale, offset)
-
-        aperture_sample = mi.Vector2f(0.0)
-        if sensor.needs_aperture_sample():
-            aperture_sample = sampler.next_2d()
-
-        time = sensor.shutter_open()
-        if sensor.shutter_open_time() > 0:
-            time += sampler.next_1d() * sensor.shutter_open_time()
-
-        wavelength_sample = 0
-        if mi.is_spectral:
-            wavelength_sample = sampler.next_1d()
-
-        ray, weight = sensor.sample_ray(
-            time=time,
-            sample1=wavelength_sample,
-            sample2=pos_adjusted,
-            sample3=aperture_sample
-        )
-
-        # With box filter, ignore random offset to prevent numerical instabilities
-        splatting_pos = mi.Vector2f(pos) if rfilter.is_box_filter() else pos_f
-
-        return ray, weight, splatting_pos
 
 
     def render_ad(self,
@@ -186,15 +69,6 @@ class CameraIntegrator(PSIntegrator):
                 "account for shapes entering or leaving the viewport, it is "
                 "recommended that you set the film's 'sample_border' parameter "
                 "to True.")
-
-        # # Primarily visible discontinuous derivative
-        # if sppp > 0 and has_silhouettes:
-        #     with dr.suspend_grad():
-        #         self.proj_detail.init_primarily_visible_silhouette(scene, sensor)
-
-        #     sampler, spp = self.prepare(sensor, 0xffffffff ^ seed, sppp, aovs)
-        #     result_img += self.render_primarily_visible_silhouette(scene, sensor, sampler, spp)
-
 
         # Continuous derivative (only if radiative backpropagation is not used)
         # if sppc > 0 and (not self.radiative_backprop):
@@ -266,7 +140,7 @@ class CameraIntegrator(PSIntegrator):
             world_to_sample = camera_to_sample @ to_local
 
             pin_attached_local = world_to_sample @ dr.detach(ray(distance))
-            pos__ = mi.Vector2f(pin_attached_local[0], pin_attached_local[1]) * film.size()  # Why * film.size()?
+            pos__ = mi.Vector2f(pin_attached_local[0], pin_attached_local[1]) * film.size()
             pos = dr.replace_grad(pos, pos__)
 
         block = film.create_block()
@@ -442,161 +316,4 @@ class CameraIntegrator(PSIntegrator):
         return L, active, [], guide_seed if project else None, first_it_t
 
 
-    # def sample_radiance_difference(self, scene, ss, curr_depth, sampler, active):
-    #     if curr_depth == 1:
-
-    #         # ----------- Estimate the radiance of the background -----------
-
-    #         ray_bg = ss.spawn_ray()
-    #         si_bg = scene.ray_intersect(ray_bg, active=active)
-    #         radiance_bg = si_bg.emitter(scene).eval(si_bg, active)
-
-    #         # ----------- Estimate the radiance of the foreground -----------
-
-    #         # For direct illumination integrators, only an area emitter can
-    #         # contribute here. It is possible to call ``sample()`` to estimate
-    #         # this contribution. But to avoid the overhead we simply query the
-    #         # emitter here to obtain the radiance.
-    #         si_fg = dr.zeros(mi.SurfaceInteraction3f)
-
-    #         # We know the incident direction is valid since this is the
-    #         # foreground interaction. Overwrite the incident direction to avoid
-    #         # potential issues introduced by smooth normals.
-    #         si_fg.wi = mi.Vector3f(0, 0, 1)
-    #         radiance_fg = ss.shape.emitter().eval(si_fg, active)
-    #     elif curr_depth == 0:
-
-    #         # ----------- Estimate the radiance of the background -----------
-    #         ray_bg = ss.spawn_ray()
-    #         radiance_bg, _, _, _ = self.sample(
-    #             dr.ADMode.Primal, scene, sampler, ray_bg, curr_depth, None, None, active, False, None)
-
-    #         # ----------- Estimate the radiance of the foreground -----------
-    #         # Create a preliminary intersection point
-    #         pi_fg = dr.zeros(mi.PreliminaryIntersection3f)
-    #         pi_fg.t = 1
-    #         pi_fg.prim_index = ss.prim_index
-    #         pi_fg.prim_uv = ss.uv
-    #         pi_fg.shape = ss.shape
-
-    #         # Create a dummy ray that we never perform ray-intersection with to
-    #         # compute other fields in ``si``
-    #         dummy_ray = mi.Ray3f(ss.p - ss.d, ss.d)
-
-    #         # The ray origin is wrong, but this is fine if we only need the primal
-    #         # radiance
-    #         si_fg = pi_fg.compute_surface_interaction(
-    #             dummy_ray, mi.RayFlags.All, active)
-
-    #         # If smooth normals are used, it is possible that the computed
-    #         # shading normal near visibility silhouette points to the wrong side
-    #         # of the surface. We fix this by clamping the shading frame normal
-    #         # to the visible side.
-    #         alpha = dr.dot(si_fg.sh_frame.n, ss.d)
-    #         eps = dr.epsilon(alpha) * 100
-    #         wrong_side = active & (alpha > -eps)
-
-    #         # NOTE: In the following case, (1) a single sided BSDF is used,
-    #         # (2) the silhouette sample is on an open boundary like an open
-    #         # edge, and (3) we actually hit the back side of the surface,
-    #         # the expected radiance is zero because no BSDF is defiend on
-    #         # that side. But this shading frame correction will mistakenly
-    #         # produce a non-zero radiance. Please use two-sided BSDFs if
-    #         # this is a concern.
-
-    #         # Remove the component of the shading frame normal that points to
-    #         # the wrong side
-    #         new_sh_normal = dr.normalize(
-    #             si_fg.sh_frame.n - (alpha + eps) * ss.d)
-    #         # `si_fg` surgery
-    #         si_fg.sh_frame[wrong_side] = mi.Frame3f(new_sh_normal)
-    #         si_fg.wi[wrong_side] = si_fg.to_local(-ss.d)
-
-    #         # Estimate the radiance starting from the surface interaction
-    #         radiance_fg, _, _, _ = self.sample(
-    #             dr.ADMode.Primal, scene, sampler, ray_bg, curr_depth, None, None, active, False, si_fg)
-
-    #     else:
-    #         raise Exception(f"Unexpected depth {curr_depth} in direct projective integrator")
-
-    #     # Compute the radiance difference
-    #     radiance_diff = radiance_fg - radiance_bg
-    #     active_diff = active & (dr.max(dr.abs(radiance_diff)) > 0)
-
-    #     return radiance_diff, active_diff
-
-
-
-
-    # def render_primarily_visible_silhouette(self,
-    #                                         scene: mi.Scene,
-    #                                         sensor: mi.Sensor,
-    #                                         sampler: mi.Sampler,
-    #                                         spp: int) -> mi.TensorXf:
-    #     """
-    #     Renders the primarily visible discontinuities.
-
-    #     This method returns the AD-attached image. The result must still be
-    #     traversed using one of the Dr.Jit functions to propagate gradients.
-    #     """
-    #     film = sensor.film()
-    #     aovs = self.aov_names()
-
-    #     # Explicit sampling to handle the primarily visible discontinuous derivative
-    #     with dr.suspend_grad():
-    #         # Get the viewpoint
-    #         sensor_center = sensor.world_transform() @ mi.Point3f(0)
-
-    #         # Sample silhouette point
-    #         ss = self.proj_detail.sample_primarily_visible_silhouette(
-    #             scene, sensor_center, sampler.next_2d(), True)
-    #         active = ss.is_valid() & (ss.pdf > 0)
-
-    #         # Jacobian (motion correction included)
-    #         J = self.proj_detail.perspective_sensor_jacobian(sensor, ss)
-
-    #         ΔL = self.proj_detail.eval_primary_silhouette_radiance_difference(
-    #             scene, sampler, ss, sensor_center, active=active)
-    #         active &= dr.any(dr.neq(ΔL, 0))
-
-    #     # ∂z/∂ⲡ * normal
-    #     si = dr.zeros(mi.SurfaceInteraction3f)
-    #     si.p = ss.p
-    #     si.prim_index = ss.prim_index
-    #     si.uv = ss.uv
-    #     p = ss.shape.differential_motion(dr.detach(si), active)
-
-    #     p = sensor.world_transform() @ p
-    #     p = -1 * p
-    #     # print(sensor.world_transform())
-    #     # print(dr.grad(sensor.world_transform()))
-        
-    #     motion = dr.dot(p, ss.n)
-
-    #     # Compute the derivative (motion)
-    #     derivative = ΔL * motion * dr.rcp(ss.pdf) * J
-
-    #     # Prepare a new imageblock and compute splatting coordinates
-    #     film.prepare(aovs)
-    #     with dr.suspend_grad():
-    #         it = dr.zeros(mi.Interaction3f)
-    #         it.p = ss.p
-    #         sensor_ds, _ = sensor.sample_direction(it, mi.Point2f(0))
-
-    #     # Particle tracer style imageblock to accumulate primarily visible derivatives
-    #     block = film.create_block(normalize=True)
-    #     block.set_coalesce(block.coalesce() and spp >= 4)
-    #     block.put(
-    #         pos=sensor_ds.uv,
-    #         wavelengths=[],
-    #         value=derivative * dr.rcp(mi.ScalarFloat(spp)),
-    #         weight=0,
-    #         alpha=1,
-    #         active=active
-    #     )
-    #     film.put_block(block)
-
-    #     return film.develop()
-    
-
-mi.register_integrator("camera", lambda props: CameraIntegrator(props))
+mi.register_integrator("camera_direct", lambda props: CameraDirIntegrator(props))
